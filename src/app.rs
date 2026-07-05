@@ -295,7 +295,11 @@ impl App {
         let tx = self.tx.clone();
         spawn(async move {
             let result = client
-                .scan_all_items(&desc.table_name, &desc.key_schema_type)
+                .scan_items(
+                    &desc.table_name,
+                    &desc.key_schema_type,
+                    crate::client::DEFAULT_SCAN_LIMIT,
+                )
                 .await;
             tx.send(AppEvent::CompleteLoadTableItems(desc, result));
         });

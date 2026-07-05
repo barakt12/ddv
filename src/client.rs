@@ -30,6 +30,10 @@ use crate::{
     error::{AppError, AppResult},
 };
 
+/// How many items to pull when a table is first opened. Bounded on purpose:
+/// opening a table must never trigger a full-table scan. Use a query for more.
+pub const DEFAULT_SCAN_LIMIT: i32 = 100;
+
 pub struct Client {
     client: aws_sdk_dynamodb::Client,
 }
@@ -111,29 +115,29 @@ impl Client {
         Ok(desc)
     }
 
-    pub async fn scan_all_items(
+    /// Load the first bounded page of a table. Deliberately does NOT drain the
+    /// whole table — a full scan of a large table is exactly what we avoid.
+    pub async fn scan_items(
         &self,
         table_name: &str,
         schema: &KeySchemaType,
+        limit: i32,
     ) -> AppResult<Vec<Item>> {
-        let mut last_evaluated_key = None;
-        let mut items = Vec::new();
-        loop {
-            let mut req = self.client.scan().table_name(table_name);
-            if last_evaluated_key.is_some() {
-                req = req.set_exclusive_start_key(last_evaluated_key);
-            }
+        let output = self
+            .client
+            .scan()
+            .table_name(table_name)
+            .limit(limit)
+            .send()
+            .await
+            .map_err(|e| AppError::new("failed to scan items", e))?;
 
-            let result = req.send().await;
-            let output = result.map_err(|e| AppError::new("failed to scan items", e))?;
-
-            items.extend(output.items.unwrap_or_default().into_iter().map(to_item));
-
-            if output.last_evaluated_key.is_none() {
-                break;
-            }
-            last_evaluated_key = output.last_evaluated_key;
-        }
+        let mut items: Vec<Item> = output
+            .items
+            .unwrap_or_default()
+            .into_iter()
+            .map(to_item)
+            .collect();
         sort_items(&mut items, schema);
         Ok(items)
     }
