@@ -14,6 +14,7 @@ use aws_sdk_dynamodb::types::{
     ScalarAttributeType as AwsScalarAttributeType, TableDescription as AwsTableDescription,
     TableStatus as AwsTableStatus,
 };
+use aws_sdk_dynamodb::primitives::Blob;
 use aws_smithy_types::DateTime as AwsDateTime;
 use chrono::{DateTime, Local, TimeZone as _};
 use rust_decimal::Decimal;
@@ -22,7 +23,8 @@ use crate::{
     data::{
         Attribute, AttributeDefinition, GlobalSecondaryIndexDescription, Item, KeySchemaElement,
         KeySchemaType, KeyType, LocalSecondaryIndexDescription, Projection, ProjectionType,
-        ProvisionedThroughput, ScalarAttributeType, Table, TableDescription, TableStatus,
+        ProvisionedThroughput, QueryRequest, ScalarAttributeType, SortKeyCondition, Table,
+        TableDescription, TableStatus,
     },
     error::{AppError, AppResult},
 };
@@ -126,6 +128,175 @@ impl Client {
         }
         sort_items(&mut items, schema);
         Ok(items)
+    }
+
+    pub async fn query_items(
+        &self,
+        table_name: &str,
+        request: &QueryRequest,
+        schema: &KeySchemaType,
+    ) -> AppResult<Vec<Item>> {
+        let (key_condition, names, values) = build_key_condition(request);
+
+        let mut last_evaluated_key = None;
+        let mut items = Vec::new();
+        loop {
+            let mut req = self
+                .client
+                .query()
+                .table_name(table_name)
+                .key_condition_expression(&key_condition)
+                .set_expression_attribute_names(Some(names.clone()))
+                .set_expression_attribute_values(Some(values.clone()));
+            if let Some(index) = &request.index_name {
+                req = req.index_name(index);
+            }
+            if last_evaluated_key.is_some() {
+                req = req.set_exclusive_start_key(last_evaluated_key);
+            }
+
+            let result = req.send().await;
+            let output = result.map_err(|e| AppError::new("failed to query items", e))?;
+
+            items.extend(output.items.unwrap_or_default().into_iter().map(to_item));
+
+            if output.last_evaluated_key.is_none() {
+                break;
+            }
+            last_evaluated_key = output.last_evaluated_key;
+        }
+        sort_items(&mut items, schema);
+        Ok(items)
+    }
+
+    pub async fn put_item(&self, table_name: &str, item: &Item) -> AppResult<()> {
+        let aws_item = to_aws_item(item);
+        self.client
+            .put_item()
+            .table_name(table_name)
+            .set_item(Some(aws_item))
+            .send()
+            .await
+            .map_err(|e| AppError::new("failed to put item", e))?;
+        Ok(())
+    }
+
+    pub async fn delete_item(
+        &self,
+        table_name: &str,
+        item: &Item,
+        schema: &KeySchemaType,
+    ) -> AppResult<()> {
+        let key = key_of(item, schema);
+        self.client
+            .delete_item()
+            .table_name(table_name)
+            .set_key(Some(key))
+            .send()
+            .await
+            .map_err(|e| AppError::new("failed to delete item", e))?;
+        Ok(())
+    }
+}
+
+/// Build a `KeyConditionExpression` plus its expression attribute name/value maps
+/// from a [`QueryRequest`]. Uses `#p`/`#s` name placeholders and `:p`/`:s`/`:s2`
+/// value placeholders so arbitrary attribute names are safe.
+fn build_key_condition(
+    request: &QueryRequest,
+) -> (
+    String,
+    HashMap<String, String>,
+    HashMap<String, AwsAttributeValue>,
+) {
+    let mut names = HashMap::new();
+    let mut values = HashMap::new();
+
+    let (pk_name, pk_value) = &request.partition_key;
+    names.insert("#p".to_string(), pk_name.clone());
+    values.insert(":p".to_string(), to_aws_attribute_value(pk_value));
+    let mut expr = "#p = :p".to_string();
+
+    if let Some((sk_name, cond)) = &request.sort_key {
+        names.insert("#s".to_string(), sk_name.clone());
+        match cond {
+            SortKeyCondition::Eq(v) => {
+                values.insert(":s".to_string(), to_aws_attribute_value(v));
+                expr.push_str(" AND #s = :s");
+            }
+            SortKeyCondition::BeginsWith(s) => {
+                values.insert(":s".to_string(), AwsAttributeValue::S(s.clone()));
+                expr.push_str(" AND begins_with(#s, :s)");
+            }
+            SortKeyCondition::Lt(v) => {
+                values.insert(":s".to_string(), to_aws_attribute_value(v));
+                expr.push_str(" AND #s < :s");
+            }
+            SortKeyCondition::Le(v) => {
+                values.insert(":s".to_string(), to_aws_attribute_value(v));
+                expr.push_str(" AND #s <= :s");
+            }
+            SortKeyCondition::Gt(v) => {
+                values.insert(":s".to_string(), to_aws_attribute_value(v));
+                expr.push_str(" AND #s > :s");
+            }
+            SortKeyCondition::Ge(v) => {
+                values.insert(":s".to_string(), to_aws_attribute_value(v));
+                expr.push_str(" AND #s >= :s");
+            }
+            SortKeyCondition::Between(a, b) => {
+                values.insert(":s".to_string(), to_aws_attribute_value(a));
+                values.insert(":s2".to_string(), to_aws_attribute_value(b));
+                expr.push_str(" AND #s BETWEEN :s AND :s2");
+            }
+        }
+    }
+
+    (expr, names, values)
+}
+
+fn key_of(item: &Item, schema: &KeySchemaType) -> HashMap<String, AwsAttributeValue> {
+    let mut key = HashMap::new();
+    let mut add = |name: &str| {
+        if let Some(attr) = item.attributes.get(name) {
+            key.insert(name.to_string(), to_aws_attribute_value(attr));
+        }
+    };
+    match schema {
+        KeySchemaType::Hash(pk) => add(pk),
+        KeySchemaType::HashRange(pk, sk) => {
+            add(pk);
+            add(sk);
+        }
+    }
+    key
+}
+
+pub fn to_aws_item(item: &Item) -> HashMap<String, AwsAttributeValue> {
+    item.attributes
+        .iter()
+        .map(|(k, v)| (k.clone(), to_aws_attribute_value(v)))
+        .collect()
+}
+
+fn to_aws_attribute_value(attr: &Attribute) -> AwsAttributeValue {
+    match attr {
+        Attribute::S(s) => AwsAttributeValue::S(s.clone()),
+        Attribute::N(n) => AwsAttributeValue::N(n.to_string()),
+        Attribute::B(b) => AwsAttributeValue::B(Blob::new(b.clone())),
+        Attribute::BOOL(b) => AwsAttributeValue::Bool(*b),
+        Attribute::NULL => AwsAttributeValue::Null(true),
+        Attribute::L(vs) => AwsAttributeValue::L(vs.iter().map(to_aws_attribute_value).collect()),
+        Attribute::M(m) => AwsAttributeValue::M(
+            m.iter()
+                .map(|(k, v)| (k.clone(), to_aws_attribute_value(v)))
+                .collect(),
+        ),
+        Attribute::SS(ss) => AwsAttributeValue::Ss(ss.iter().cloned().collect()),
+        Attribute::NS(ns) => AwsAttributeValue::Ns(ns.iter().map(|n| n.to_string()).collect()),
+        Attribute::BS(bs) => {
+            AwsAttributeValue::Bs(bs.iter().map(|b| Blob::new(b.clone())).collect())
+        }
     }
 }
 
