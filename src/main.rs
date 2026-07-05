@@ -10,6 +10,7 @@ mod event;
 mod help;
 mod item_json;
 mod macros;
+mod patterns;
 mod util;
 mod view;
 mod widget;
@@ -56,11 +57,13 @@ async fn main() -> std::io::Result<()> {
     };
     let profile = args.profile;
     // Curated list from config if provided, else every profile in the AWS files.
-    let profiles = if config.profiles.is_empty() {
+    let mut profiles = if config.profiles.is_empty() {
         aws_profiles::list_profiles()
     } else {
         config.profiles.clone()
     };
+    // Offer local DynamoDB (localhost:8000) as the first pick, next to AWS profiles.
+    profiles.insert(0, crate::app::LOCAL_PROFILE.to_string());
 
     // If a profile was passed on the CLI, use it directly; otherwise the app
     // opens on a profile picker.

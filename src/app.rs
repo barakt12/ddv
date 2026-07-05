@@ -31,6 +31,10 @@ enum Status {
     Input(String, Option<u16>),
 }
 
+/// Synthetic profile-picker entry that connects to local DynamoDB instead of AWS.
+pub const LOCAL_PROFILE: &str = "local (localhost:8000)";
+pub const LOCAL_ENDPOINT: &str = "http://localhost:8000";
+
 /// Connection parameters needed to build a client once a profile is chosen.
 #[derive(Clone)]
 pub struct ConnParams {
@@ -277,13 +281,23 @@ impl App {
 impl App {
     fn select_profile(&mut self, profile: String) {
         self.loading = true;
-        let conn = self.conn.clone();
+        let mut conn = self.conn.clone();
+        // The synthetic "local" entry connects to local DynamoDB with no profile.
+        let use_profile = if profile == LOCAL_PROFILE {
+            conn.endpoint_url = Some(LOCAL_ENDPOINT.to_string());
+            if conn.region.is_none() {
+                conn.region = Some("eu-west-1".to_string());
+            }
+            None
+        } else {
+            Some(profile)
+        };
         let tx = self.tx.clone();
         spawn(async move {
             let client = Client::new(
                 conn.region.clone(),
                 conn.endpoint_url.clone(),
-                Some(profile),
+                use_profile,
                 conn.default_region.clone(),
             )
             .await;

@@ -125,6 +125,7 @@ pub enum UserEvent {
     Save,
     ToggleJsonMode,
     Delete,
+    Patterns,
     Help,
 }
 
@@ -175,6 +176,7 @@ impl UserEventMapper {
             (KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL), UserEvent::Save),
             (KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL), UserEvent::ToggleJsonMode),
             (KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE), UserEvent::Delete),
+            (KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL), UserEvent::Patterns),
             (KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE), UserEvent::Help),
         ];
         UserEventMapper { map }
