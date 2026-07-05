@@ -23,6 +23,8 @@ pub enum AppEvent {
     OpenEditor(TableDescription, Option<Item>),
     SaveItem(TableDescription, Item),
     CompleteSaveItem(TableDescription, AppResult<()>),
+    DeleteItem(TableDescription, Item),
+    CompleteDeleteItem(TableDescription, AppResult<()>),
     OpenTableInsight(TableInsight),
     OpenHelp(Vec<Spans>),
     BackToBeforeView,
@@ -116,6 +118,7 @@ pub enum UserEvent {
     New,
     Save,
     ToggleJsonMode,
+    Delete,
     Help,
 }
 
@@ -165,6 +168,7 @@ impl UserEventMapper {
             (KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE), UserEvent::New),
             (KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL), UserEvent::Save),
             (KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL), UserEvent::ToggleJsonMode),
+            (KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE), UserEvent::Delete),
             (KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE), UserEvent::Help),
         ];
         UserEventMapper { map }

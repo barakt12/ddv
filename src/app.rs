@@ -150,6 +150,12 @@ impl App {
                 AppEvent::CompleteSaveItem(desc, result) => {
                     self.complete_save_item(desc, result);
                 }
+                AppEvent::DeleteItem(desc, item) => {
+                    self.delete_item(desc, item);
+                }
+                AppEvent::CompleteDeleteItem(desc, result) => {
+                    self.complete_delete_item(desc, result);
+                }
                 AppEvent::OpenTableInsight(insight) => {
                     self.open_table_insight(insight);
                 }
@@ -394,6 +400,32 @@ impl App {
             }
             Err(e) => {
                 // stay in the editor so edits aren't lost
+                self.tx.send(AppEvent::NotifyError(e));
+            }
+        }
+    }
+
+    fn delete_item(&mut self, desc: TableDescription, item: Item) {
+        self.loading = true;
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        spawn(async move {
+            let result = client
+                .delete_item(&desc.table_name, &item, &desc.key_schema_type)
+                .await;
+            tx.send(AppEvent::CompleteDeleteItem(desc, result));
+        });
+    }
+
+    fn complete_delete_item(&mut self, desc: TableDescription, result: AppResult<()>) {
+        self.loading = false;
+        match result {
+            Ok(()) => {
+                self.tx
+                    .send(AppEvent::NotifySuccess("Item deleted".to_string()));
+                self.tx.send(AppEvent::LoadTableItems(desc));
+            }
+            Err(e) => {
                 self.tx.send(AppEvent::NotifyError(e));
             }
         }
