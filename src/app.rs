@@ -141,6 +141,15 @@ impl App {
                 AppEvent::RunQuery(desc, request) => {
                     self.run_query(desc, request);
                 }
+                AppEvent::OpenEditor(desc, item) => {
+                    self.open_editor(desc, item);
+                }
+                AppEvent::SaveItem(desc, item) => {
+                    self.save_item(desc, item);
+                }
+                AppEvent::CompleteSaveItem(desc, result) => {
+                    self.complete_save_item(desc, result);
+                }
                 AppEvent::OpenTableInsight(insight) => {
                     self.open_table_insight(insight);
                 }
@@ -356,6 +365,38 @@ impl App {
                 .await;
             tx.send(AppEvent::CompleteLoadTableItems(desc, result));
         });
+    }
+
+    fn open_editor(&mut self, desc: TableDescription, item: Option<Item>) {
+        let view = View::of_edit(desc, item, &self.mapper, self.theme, self.tx.clone());
+        self.view_stack.push(view);
+    }
+
+    fn save_item(&mut self, desc: TableDescription, item: Item) {
+        self.loading = true;
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        spawn(async move {
+            let result = client.put_item(&desc.table_name, &item).await;
+            tx.send(AppEvent::CompleteSaveItem(desc, result));
+        });
+    }
+
+    fn complete_save_item(&mut self, desc: TableDescription, result: AppResult<()>) {
+        self.loading = false;
+        match result {
+            Ok(()) => {
+                // leave the editor and refresh the table to reflect the change
+                self.view_stack.pop();
+                self.tx
+                    .send(AppEvent::NotifySuccess("Item saved".to_string()));
+                self.tx.send(AppEvent::LoadTableItems(desc));
+            }
+            Err(e) => {
+                // stay in the editor so edits aren't lost
+                self.tx.send(AppEvent::NotifyError(e));
+            }
+        }
     }
 
     fn open_table_insight(&mut self, insight: TableInsight) {

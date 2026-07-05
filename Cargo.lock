@@ -1089,6 +1089,7 @@ dependencies = [
  "tokio",
  "toml",
  "tui-input",
+ "tui-textarea-2",
  "umbra",
 ]
 
@@ -3802,6 +3803,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "79c1ee964298f136020f5f69e0e601f4d3a1f610a7baf1af9fcb96152e8a2c45"
 dependencies = [
  "ratatui",
+ "unicode-width",
+]
+
+[[package]]
+name = "tui-textarea-2"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6223d7c35c182bccd9af9e3e2ae695312b1c295617a2c3ed34a643176ee256e"
+dependencies = [
+ "crossterm",
+ "portable-atomic",
+ "ratatui-core",
+ "ratatui-widgets",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

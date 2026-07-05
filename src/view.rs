@@ -1,6 +1,7 @@
 mod views;
 
 mod common;
+mod edit;
 mod help;
 mod init;
 mod item;

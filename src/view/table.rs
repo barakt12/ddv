@@ -230,6 +230,12 @@ impl TableView {
                 UserEvent::Query => {
                     self.open_query_form();
                 }
+                UserEvent::Edit => {
+                    self.open_editor_for_selected();
+                }
+                UserEvent::New => {
+                    self.open_editor_for_new();
+                }
                 UserEvent::Expand => {
                     self.open_expand_selected_attr();
                 }
@@ -499,6 +505,20 @@ impl TableView {
     fn open_query_form(&self) {
         self.tx
             .send(AppEvent::OpenQueryForm(self.table_description.clone()));
+    }
+
+    fn open_editor_for_selected(&self) {
+        if let Some(item) = self.current_selected_item() {
+            self.tx.send(AppEvent::OpenEditor(
+                self.table_description.clone(),
+                Some(item.clone()),
+            ));
+        }
+    }
+
+    fn open_editor_for_new(&self) {
+        self.tx
+            .send(AppEvent::OpenEditor(self.table_description.clone(), None));
     }
 
     fn open_table_insight(&self) {

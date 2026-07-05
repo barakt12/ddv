@@ -614,6 +614,52 @@ mod tests {
         assert_eq!(s(values.get(":s").unwrap()), "PAY#");
     }
 
+    // End-to-end against a local DynamoDB throwaway table `ddv_e2e_test`.
+    // Run with: cargo test -- --ignored e2e_local_crud
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_local_crud() {
+        std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+        std::env::set_var("AWS_REGION", "eu-west-1");
+        let client = Client::new(
+            None,
+            Some("http://127.0.0.1:8000".to_string()),
+            None,
+            "eu-west-1".to_string(),
+        )
+        .await;
+        let table = "ddv_e2e_test";
+        let schema = KeySchemaType::HashRange("pk".into(), "sk".into());
+
+        let mut attrs = HashMap::new();
+        attrs.insert("pk".to_string(), Attribute::S("U#1".into()));
+        attrs.insert("sk".to_string(), Attribute::S("PROFILE".into()));
+        attrs.insert("name".to_string(), Attribute::S("neo".into()));
+        let item = Item { attributes: attrs };
+
+        // put
+        client.put_item(table, &item).await.map_err(|e| e.msg).unwrap();
+
+        // query it back
+        let req = QueryRequest {
+            index_name: None,
+            partition_key: ("pk".into(), Attribute::S("U#1".into())),
+            sort_key: Some(("sk".into(), SortKeyCondition::BeginsWith("PRO".into()))),
+        };
+        let found = client.query_items(table, &req, &schema).await.map_err(|e| e.msg).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].attributes.get("name"),
+            Some(&Attribute::S("neo".into()))
+        );
+
+        // delete it
+        client.delete_item(table, &item, &schema).await.map_err(|e| e.msg).unwrap();
+        let after = client.query_items(table, &req, &schema).await.map_err(|e| e.msg).unwrap();
+        assert!(after.is_empty(), "item should be gone after delete");
+    }
+
     #[test]
     fn key_condition_between() {
         let req = QueryRequest {

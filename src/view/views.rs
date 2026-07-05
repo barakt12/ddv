@@ -7,8 +7,8 @@ use crate::{
     event::{Sender, UserEvent, UserEventMapper},
     help::{Spans, SpansWithPriority},
     view::{
-        help::HelpView, init::InitView, item::ItemView, query::QueryView, table::TableView,
-        table_insight::TableInsightView, table_list::TableListView,
+        edit::EditView, help::HelpView, init::InitView, item::ItemView, query::QueryView,
+        table::TableView, table_insight::TableInsightView, table_list::TableListView,
     },
 };
 
@@ -18,6 +18,7 @@ pub enum View {
     Table(Box<TableView>),
     Item(Box<ItemView>),
     Query(Box<QueryView>),
+    Edit(Box<EditView>),
     TableInsight(Box<TableInsightView>),
     Help(Box<HelpView>),
 }
@@ -30,6 +31,7 @@ impl View {
             View::Table(view) => view.handle_user_key_event(user_events, key_event),
             View::Item(view) => view.handle_user_key_event(user_events, key_event),
             View::Query(view) => view.handle_user_key_event(user_events, key_event),
+            View::Edit(view) => view.handle_user_key_event(user_events, key_event),
             View::TableInsight(view) => view.handle_user_key_event(user_events, key_event),
             View::Help(view) => view.handle_user_key_event(user_events, key_event),
         }
@@ -42,6 +44,7 @@ impl View {
             View::Table(view) => view.render(f, area),
             View::Item(view) => view.render(f, area),
             View::Query(view) => view.render(f, area),
+            View::Edit(view) => view.render(f, area),
             View::TableInsight(view) => view.render(f, area),
             View::Help(view) => view.render(f, area),
         }
@@ -54,6 +57,7 @@ impl View {
             View::Table(view) => view.short_helps(),
             View::Item(view) => view.short_helps(),
             View::Query(view) => view.short_helps(),
+            View::Edit(view) => view.short_helps(),
             View::TableInsight(view) => view.short_helps(),
             View::Help(view) => view.short_helps(),
         }
@@ -107,6 +111,16 @@ impl View {
         tx: Sender,
     ) -> Self {
         View::Query(Box::new(QueryView::new(desc, mapper, theme, tx)))
+    }
+
+    pub fn of_edit(
+        desc: TableDescription,
+        item: Option<Item>,
+        mapper: &UserEventMapper,
+        theme: ColorTheme,
+        tx: Sender,
+    ) -> Self {
+        View::Edit(Box::new(EditView::new(desc, item, mapper, theme, tx)))
     }
 
     pub fn of_table_insight(
