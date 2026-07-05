@@ -68,6 +68,15 @@ impl Client {
         if let Some(profile) = &profile {
             config_loader = config_loader.profile_name(profile);
         }
+        // Local DynamoDB (endpoint set, no profile) ignores credentials, but the
+        // SDK still needs some to sign requests — supply dummy static ones.
+        if endpoint_url.is_some() && profile.is_none() {
+            config_loader = config_loader.credentials_provider(
+                aws_sdk_dynamodb::config::Credentials::new(
+                    "local", "local", None, None, "ddv-local",
+                ),
+            );
+        }
         let sdk_config = config_loader.load().await;
 
         let config_builder = aws_sdk_dynamodb::config::Builder::from(&sdk_config);

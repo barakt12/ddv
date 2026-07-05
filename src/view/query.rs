@@ -1,11 +1,12 @@
+use std::collections::HashSet;
 use std::str::FromStr;
 
 use ratatui::{
-    crossterm::event::{Event, KeyEvent},
-    layout::Rect,
+    crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers},
+    layout::{Constraint, Flex, Layout, Rect},
     style::Stylize,
     text::{Line, Span},
-    widgets::{Block, Padding, Paragraph},
+    widgets::{Block, Clear, Padding, Paragraph},
     Frame,
 };
 use rust_decimal::Decimal;
@@ -22,7 +23,15 @@ use crate::{
         build_help_spans, build_short_help_spans, BuildHelpsItem, BuildShortHelpsItem, Spans,
         SpansWithPriority,
     },
+    patterns::{self, KeyPattern},
 };
+
+/// Overlay state for the access-pattern picker (favorites by default).
+struct Picker {
+    show_all: bool,
+    idx: usize,
+    filter: String,
+}
 
 const SORT_OPS: [(SortOp, &str); 7] = [
     (SortOp::Eq, "="),
@@ -70,6 +79,10 @@ pub struct QueryView {
     focus: usize,
     error: Option<String>,
 
+    patterns: Vec<KeyPattern>,
+    favorites: HashSet<String>,
+    picker: Option<Picker>,
+
     helps: Vec<Spans>,
     helps_short: Vec<SpansWithPriority>,
     theme: ColorTheme,
@@ -104,6 +117,21 @@ impl QueryView {
             }
         }
 
+        // Open the pattern picker up front so our access patterns are visible
+        // immediately (Esc drops to the manual form). Starts in All when there
+        // are no favorites yet, else in Favorites.
+        let loaded_patterns = patterns::load_patterns();
+        let loaded_favorites = patterns::load_favorites();
+        let picker = if loaded_patterns.is_empty() {
+            None
+        } else {
+            Some(Picker {
+                show_all: loaded_favorites.is_empty(),
+                idx: 0,
+                filter: String::new(),
+            })
+        };
+
         QueryView {
             table_description,
             index_options,
@@ -114,6 +142,9 @@ impl QueryView {
             sk_input2: Input::default(),
             focus: 0,
             error: None,
+            patterns: loaded_patterns,
+            favorites: loaded_favorites,
+            picker,
             helps: build_helps(mapper, theme),
             helps_short: build_short_helps(mapper),
             theme,
@@ -155,6 +186,20 @@ impl QueryView {
     pub fn handle_user_key_event(&mut self, user_events: Vec<UserEvent>, key_event: KeyEvent) {
         let has = |e: UserEvent| user_events.contains(&e);
 
+        if self.picker.is_some() {
+            self.handle_picker_key(&user_events, key_event);
+            return;
+        }
+        if has(UserEvent::Patterns) {
+            // open in All mode when there are no favorites yet, else Favorites
+            self.picker = Some(Picker {
+                show_all: self.favorites.is_empty(),
+                idx: 0,
+                filter: String::new(),
+            });
+            return;
+        }
+
         if has(UserEvent::Reset) {
             self.tx.send(AppEvent::BackToBeforeView);
             return;
@@ -163,9 +208,15 @@ impl QueryView {
             self.submit();
             return;
         }
-        if has(UserEvent::NextPane) {
-            let len = self.fields().len();
-            self.focus = (self.focus + 1) % len;
+        // Move between fields with Tab / Shift-Tab / arrow Up-Down (raw arrows so
+        // that j/k/h/l still type into the PK/SK text inputs).
+        let fields_len = self.fields().len();
+        if has(UserEvent::NextPane) || matches!(key_event.code, KeyCode::Down) {
+            self.focus = (self.focus + 1) % fields_len;
+            return;
+        }
+        if matches!(key_event.code, KeyCode::Up | KeyCode::BackTab) {
+            self.focus = (self.focus + fields_len - 1) % fields_len;
             return;
         }
 
@@ -305,6 +356,202 @@ impl QueryView {
         }
     }
 
+    /// Patterns visible in the picker: favorites, or all when `show_all`.
+    fn visible_patterns(&self) -> Vec<KeyPattern> {
+        let (all, filter) = match &self.picker {
+            Some(p) => (p.show_all, p.filter.clone()),
+            None => (false, String::new()),
+        };
+        let base: Vec<KeyPattern> = if all {
+            self.patterns.clone()
+        } else {
+            self.patterns
+                .iter()
+                .filter(|p| self.favorites.contains(&p.name))
+                .cloned()
+                .collect()
+        };
+        let f = filter.trim().to_lowercase();
+        if f.is_empty() {
+            return base;
+        }
+        let tokens: Vec<&str> = f.split_whitespace().collect();
+        base.into_iter()
+            .filter(|p| {
+                let hay = format!("{} {} {}", p.name, p.pk, p.sk).to_lowercase();
+                tokens.iter().all(|t| hay.contains(t))
+            })
+            .collect()
+    }
+
+    fn handle_picker_key(&mut self, user_events: &[UserEvent], key_event: KeyEvent) {
+        let has = |e: UserEvent| user_events.contains(&e);
+        let len = self.visible_patterns().len();
+        let ctrl = key_event.modifiers.contains(KeyModifiers::CONTROL);
+
+        if has(UserEvent::Reset) {
+            self.picker = None;
+            return;
+        }
+        if has(UserEvent::Confirm) {
+            let idx = self.picker.as_ref().map(|p| p.idx).unwrap_or(0);
+            if let Some(sel) = self.visible_patterns().get(idx).cloned() {
+                self.apply_pattern(&sel);
+            }
+            self.picker = None;
+            return;
+        }
+        // navigation via arrows or Ctrl-n/Ctrl-p (letters stay free for the filter)
+        let down =
+            matches!(key_event.code, KeyCode::Down) || (ctrl && key_event.code == KeyCode::Char('n'));
+        let up =
+            matches!(key_event.code, KeyCode::Up) || (ctrl && key_event.code == KeyCode::Char('p'));
+        if down && len > 0 {
+            if let Some(p) = self.picker.as_mut() {
+                p.idx = (p.idx + 1) % len;
+            }
+            return;
+        }
+        if up && len > 0 {
+            if let Some(p) = self.picker.as_mut() {
+                p.idx = (p.idx + len - 1) % len;
+            }
+            return;
+        }
+        // Left/Right arrows (or Ctrl-A) toggle All <-> Favorites
+        if matches!(key_event.code, KeyCode::Left | KeyCode::Right) {
+            if let Some(p) = self.picker.as_mut() {
+                p.show_all = !p.show_all;
+                p.idx = 0;
+            }
+            return;
+        }
+        // Ctrl-A toggles all/favorites; Ctrl-S stars/unstars the selection
+        if ctrl && key_event.code == KeyCode::Char('a') {
+            if let Some(p) = self.picker.as_mut() {
+                p.show_all = !p.show_all;
+                p.idx = 0;
+            }
+            return;
+        }
+        if ctrl && key_event.code == KeyCode::Char('s') {
+            let idx = self.picker.as_ref().map(|p| p.idx).unwrap_or(0);
+            if let Some(name) = self.visible_patterns().get(idx).map(|p| p.name.clone()) {
+                if self.favorites.contains(&name) {
+                    self.favorites.remove(&name);
+                } else {
+                    self.favorites.insert(name);
+                }
+                patterns::save_favorites(&self.favorites);
+            }
+            return;
+        }
+        // otherwise edit the fuzzy filter
+        match key_event.code {
+            KeyCode::Backspace => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.filter.pop();
+                    p.idx = 0;
+                }
+            }
+            KeyCode::Char(c) if !ctrl => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.filter.push(c);
+                    p.idx = 0;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Pre-fill the query form from a selected pattern. Partition key must be
+    /// exact, so its template lands in the PK input for you to fill; a non-empty
+    /// SK template defaults to begins_with (templates are prefixes).
+    fn apply_pattern(&mut self, p: &KeyPattern) {
+        self.index_idx = 0;
+        self.pk_input = Input::new(p.pk.clone());
+        if self.has_sort_key() {
+            if p.sk.is_empty() {
+                self.sk_input = Input::new(String::new());
+                self.sort_op_idx = 0;
+            } else {
+                self.sk_input = Input::new(p.sk.clone());
+                self.sort_op_idx = 1; // BeginsWith
+            }
+        }
+        self.focus = 1;
+        self.error = None;
+    }
+
+    fn render_picker(&self, f: &mut Frame, area: Rect) {
+        let vis = self.visible_patterns();
+        let show_all = self.picker.as_ref().map(|p| p.show_all).unwrap_or(false);
+        let idx = self.picker.as_ref().map(|p| p.idx).unwrap_or(0);
+
+        let [h] = Layout::horizontal([Constraint::Percentage(85)])
+            .flex(Flex::Center)
+            .areas(area);
+        let [pop] = Layout::vertical([Constraint::Percentage(85)])
+            .flex(Flex::Center)
+            .areas(h);
+
+        let filter = self.picker.as_ref().map(|p| p.filter.clone()).unwrap_or_default();
+        let mode = if show_all { "All" } else { "Favorites" };
+        let title = if filter.is_empty() {
+            format!(" Patterns — {} ({}) ", mode, vis.len())
+        } else {
+            format!(" Patterns — {} ({})   filter: {} ", mode, vis.len(), filter)
+        };
+        let block = Block::bordered()
+            .title_top(Line::from(title).left_aligned())
+            .fg(self.theme.fg)
+            .bg(self.theme.bg)
+            .padding(Padding::uniform(1));
+        let inner = block.inner(pop);
+
+        let mut lines: Vec<Line> = Vec::new();
+        if vis.is_empty() {
+            lines.push(Line::from("No favorites yet.".fg(self.theme.fg)));
+            lines.push(Line::from(
+                "Press 'a' for all patterns, then 'f' to star the ones you use."
+                    .fg(self.theme.short_help),
+            ));
+        } else {
+            let rows = inner.height.saturating_sub(2).max(1) as usize;
+            let start = if idx >= rows { idx + 1 - rows } else { 0 };
+            for (i, p) in vis.iter().enumerate().skip(start).take(rows) {
+                let star = if self.favorites.contains(&p.name) {
+                    "★ "
+                } else {
+                    "  "
+                };
+                let sk = if p.sk.is_empty() {
+                    String::new()
+                } else {
+                    format!("   SK:{}", p.sk)
+                };
+                let text = format!("{}{}   PK:{}{}", star, p.name, p.pk, sk);
+                if i == idx {
+                    lines.push(Line::from(
+                        text.fg(self.theme.selected_fg)
+                            .bg(self.theme.selected_bg)
+                            .bold(),
+                    ));
+                } else {
+                    lines.push(Line::from(text.fg(self.theme.fg)));
+                }
+            }
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "↑/↓ move · ←/→ favorites/all · Enter fill · ^s star · type to filter · Esc close"
+                .fg(self.theme.short_help),
+        ));
+
+        f.render_widget(Clear, pop);
+        f.render_widget(Paragraph::new(lines).block(block), pop);
+    }
+
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
         let schema = self.current_schema().clone();
         let (pk_name, sk_name) = match &schema {
@@ -320,9 +567,20 @@ impl QueryView {
             .padding(Padding::uniform(1));
         let inner = block.inner(area);
 
+        // For < option > toggles (Index / SortOp): highlight the whole span.
         let sel = |on: bool, s: String| -> Span<'static> {
             if on {
                 s.fg(self.theme.selected_fg).bg(self.theme.selected_bg).bold()
+            } else {
+                s.fg(self.theme.fg)
+            }
+        };
+        // For text inputs (PK / SK): accent the text with a bright color (not
+        // selected_fg, which is black — meant for use over selected_bg) and keep
+        // the normal background so the block cursor stays visible while editing.
+        let txt = |on: bool, s: String| -> Span<'static> {
+            if on {
+                s.fg(self.theme.selected_bg).bold()
             } else {
                 s.fg(self.theme.fg)
             }
@@ -340,7 +598,7 @@ impl QueryView {
         // pk
         lines.push(Line::from(vec![
             format!("{pk_name}  = ").bold(),
-            sel(focused == Field::Pk, format!("[ {} ]", self.pk_input.value())),
+            txt(focused == Field::Pk, format!("[ {} ]", self.pk_input.value())),
         ]));
         // sk
         if let Some(sk_name) = &sk_name {
@@ -352,13 +610,13 @@ impl QueryView {
             if self.current_op() != SortOp::BeginsWith
                 || true /* value input applies to all ops */
             {
-                sk_spans.push(sel(focused == Field::Sk, format!("[ {} ]", self.sk_input.value())));
+                sk_spans.push(txt(focused == Field::Sk, format!("[ {} ]", self.sk_input.value())));
             }
             lines.push(Line::from(sk_spans));
             if self.current_op() == SortOp::Between {
                 lines.push(Line::from(vec![
                     "   and  ".bold(),
-                    sel(focused == Field::Sk2, format!("[ {} ]", self.sk_input2.value())),
+                    txt(focused == Field::Sk2, format!("[ {} ]", self.sk_input2.value())),
                 ]));
             }
         }
@@ -367,7 +625,7 @@ impl QueryView {
             lines.push(Line::from(err.as_str().fg(self.theme.notification_error).bold()));
         } else {
             lines.push(Line::from(
-                "Tab: next field   ←/→: change   Enter: run   Esc: cancel"
+                "Tab/Shift-Tab/↑↓: fields · ←/→: change · ^p: patterns · Enter: run · Esc: cancel"
                     .fg(self.theme.short_help),
             ));
         }
@@ -376,17 +634,21 @@ impl QueryView {
 
         // place the terminal cursor inside the focused text input
         let cursor_line = match focused {
-            Field::Pk => Some((1u16, pk_name.len() as u16 + 4, self.pk_input.visual_cursor())),
+            Field::Pk => Some((1u16, pk_name.len() as u16 + 6, self.pk_input.visual_cursor())),
             Field::Sk => sk_name
                 .as_ref()
-                .map(|n| (2u16, n.len() as u16 + 2 + SORT_OPS[self.sort_op_idx].1.len() as u16 + 4, self.sk_input.visual_cursor())),
-            Field::Sk2 => Some((3u16, 8u16, self.sk_input2.visual_cursor())),
+                .map(|n| (2u16, n.len() as u16 + SORT_OPS[self.sort_op_idx].1.len() as u16 + 10, self.sk_input.visual_cursor())),
+            Field::Sk2 => Some((3u16, 10u16, self.sk_input2.visual_cursor())),
             _ => None,
         };
-        if let Some((row, col, cur)) = cursor_line {
-            let x = inner.x + col + cur as u16;
-            let y = inner.y + row;
-            f.set_cursor_position((x, y));
+        if self.picker.is_none() {
+            if let Some((row, col, cur)) = cursor_line {
+                let x = inner.x + col + cur as u16;
+                let y = inner.y + row;
+                f.set_cursor_position((x, y));
+            }
+        } else {
+            self.render_picker(f, area);
         }
     }
 
@@ -420,6 +682,7 @@ fn build_helps(mapper: &UserEventMapper, theme: ColorTheme) -> Vec<Spans> {
         BuildHelpsItem::new(UserEvent::Left, "Previous option"),
         BuildHelpsItem::new(UserEvent::Right, "Next option"),
         BuildHelpsItem::new(UserEvent::Confirm, "Run query"),
+        BuildHelpsItem::new(UserEvent::Patterns, "Access patterns (favorites)"),
     ];
     build_help_spans(helps, mapper, theme)
 }
@@ -431,6 +694,7 @@ fn build_short_helps(mapper: &UserEventMapper) -> Vec<SpansWithPriority> {
         BuildShortHelpsItem::single(UserEvent::Reset, "Cancel", 1),
         BuildShortHelpsItem::single(UserEvent::NextPane, "Next field", 2),
         BuildShortHelpsItem::group(vec![UserEvent::Left, UserEvent::Right], "Change", 3),
+        BuildShortHelpsItem::single(UserEvent::Patterns, "Patterns", 1),
         BuildShortHelpsItem::single(UserEvent::Confirm, "Run", 0),
     ];
     build_short_help_spans(helps, mapper)
