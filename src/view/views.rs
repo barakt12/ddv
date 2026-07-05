@@ -7,16 +7,20 @@ use crate::{
     event::{Sender, UserEvent, UserEventMapper},
     help::{Spans, SpansWithPriority},
     view::{
-        help::HelpView, init::InitView, item::ItemView, table::TableView,
+        edit::EditView, help::HelpView, init::InitView, item::ItemView,
+        profile_list::ProfileListView, query::QueryView, table::TableView,
         table_insight::TableInsightView, table_list::TableListView,
     },
 };
 
 pub enum View {
     Init(Box<InitView>),
+    ProfileList(Box<ProfileListView>),
     TableList(Box<TableListView>),
     Table(Box<TableView>),
     Item(Box<ItemView>),
+    Query(Box<QueryView>),
+    Edit(Box<EditView>),
     TableInsight(Box<TableInsightView>),
     Help(Box<HelpView>),
 }
@@ -25,9 +29,12 @@ impl View {
     pub fn handle_user_key_event(&mut self, user_events: Vec<UserEvent>, key_event: KeyEvent) {
         match self {
             View::Init(view) => view.handle_user_key_event(user_events, key_event),
+            View::ProfileList(view) => view.handle_user_key_event(user_events, key_event),
             View::TableList(view) => view.handle_user_key_event(user_events, key_event),
             View::Table(view) => view.handle_user_key_event(user_events, key_event),
             View::Item(view) => view.handle_user_key_event(user_events, key_event),
+            View::Query(view) => view.handle_user_key_event(user_events, key_event),
+            View::Edit(view) => view.handle_user_key_event(user_events, key_event),
             View::TableInsight(view) => view.handle_user_key_event(user_events, key_event),
             View::Help(view) => view.handle_user_key_event(user_events, key_event),
         }
@@ -36,9 +43,12 @@ impl View {
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
         match self {
             View::Init(view) => view.render(f, area),
+            View::ProfileList(view) => view.render(f, area),
             View::TableList(view) => view.render(f, area),
             View::Table(view) => view.render(f, area),
             View::Item(view) => view.render(f, area),
+            View::Query(view) => view.render(f, area),
+            View::Edit(view) => view.render(f, area),
             View::TableInsight(view) => view.render(f, area),
             View::Help(view) => view.render(f, area),
         }
@@ -47,9 +57,12 @@ impl View {
     pub fn short_helps(&self) -> &[SpansWithPriority] {
         match self {
             View::Init(view) => view.short_helps(),
+            View::ProfileList(view) => view.short_helps(),
             View::TableList(view) => view.short_helps(),
             View::Table(view) => view.short_helps(),
             View::Item(view) => view.short_helps(),
+            View::Query(view) => view.short_helps(),
+            View::Edit(view) => view.short_helps(),
             View::TableInsight(view) => view.short_helps(),
             View::Help(view) => view.short_helps(),
         }
@@ -59,6 +72,15 @@ impl View {
 impl View {
     pub fn of_init(theme: ColorTheme, tx: Sender) -> Self {
         View::Init(Box::new(InitView::new(theme, tx)))
+    }
+
+    pub fn of_profile_list(
+        profiles: Vec<String>,
+        mapper: &UserEventMapper,
+        theme: ColorTheme,
+        tx: Sender,
+    ) -> Self {
+        View::ProfileList(Box::new(ProfileListView::new(profiles, mapper, theme, tx)))
     }
 
     pub fn of_table_list(
@@ -94,6 +116,25 @@ impl View {
         tx: Sender,
     ) -> Self {
         View::Item(Box::new(ItemView::new(desc, item, mapper, theme, tx)))
+    }
+
+    pub fn of_query(
+        desc: TableDescription,
+        mapper: &UserEventMapper,
+        theme: ColorTheme,
+        tx: Sender,
+    ) -> Self {
+        View::Query(Box::new(QueryView::new(desc, mapper, theme, tx)))
+    }
+
+    pub fn of_edit(
+        desc: TableDescription,
+        item: Option<Item>,
+        mapper: &UserEventMapper,
+        theme: ColorTheme,
+        tx: Sender,
+    ) -> Self {
+        View::Edit(Box::new(EditView::new(desc, item, mapper, theme, tx)))
     }
 
     pub fn of_table_insight(

@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     str::FromStr,
+    time::Duration,
 };
 
 use aws_config::{default_provider, meta::region::RegionProviderChain, BehaviorVersion, Region};
@@ -14,7 +15,8 @@ use aws_sdk_dynamodb::types::{
     ScalarAttributeType as AwsScalarAttributeType, TableDescription as AwsTableDescription,
     TableStatus as AwsTableStatus,
 };
-use aws_smithy_types::DateTime as AwsDateTime;
+use aws_sdk_dynamodb::primitives::Blob;
+use aws_smithy_types::{timeout::TimeoutConfig, DateTime as AwsDateTime};
 use chrono::{DateTime, Local, TimeZone as _};
 use rust_decimal::Decimal;
 
@@ -22,10 +24,15 @@ use crate::{
     data::{
         Attribute, AttributeDefinition, GlobalSecondaryIndexDescription, Item, KeySchemaElement,
         KeySchemaType, KeyType, LocalSecondaryIndexDescription, Projection, ProjectionType,
-        ProvisionedThroughput, ScalarAttributeType, Table, TableDescription, TableStatus,
+        ProvisionedThroughput, QueryRequest, ScalarAttributeType, SortKeyCondition, Table,
+        TableDescription, TableStatus,
     },
     error::{AppError, AppResult},
 };
+
+/// How many items to pull when a table is first opened. Bounded on purpose:
+/// opening a table must never trigger a full-table scan. Use a query for more.
+pub const DEFAULT_SCAN_LIMIT: i32 = 100;
 
 pub struct Client {
     client: aws_sdk_dynamodb::Client,
@@ -46,8 +53,15 @@ impl Client {
             .or_else(region_builder.build())
             .or_else(Region::new(default_region_fallback));
 
-        let mut config_loader =
-            aws_config::defaults(BehaviorVersion::latest()).region(region_provider);
+        // Fail fast on an unreachable endpoint (e.g. a stopped local DynamoDB)
+        // instead of hanging on the loading screen forever.
+        let timeout_config = TimeoutConfig::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .operation_timeout(Duration::from_secs(20))
+            .build();
+        let mut config_loader = aws_config::defaults(BehaviorVersion::latest())
+            .region(region_provider)
+            .timeout_config(timeout_config);
         if let Some(endpoint_url) = &endpoint_url {
             config_loader = config_loader.endpoint_url(endpoint_url);
         }
@@ -101,21 +115,60 @@ impl Client {
         Ok(desc)
     }
 
-    pub async fn scan_all_items(
+    /// Load the first bounded page of a table. Deliberately does NOT drain the
+    /// whole table — a full scan of a large table is exactly what we avoid.
+    pub async fn scan_items(
         &self,
         table_name: &str,
         schema: &KeySchemaType,
+        limit: i32,
     ) -> AppResult<Vec<Item>> {
+        let output = self
+            .client
+            .scan()
+            .table_name(table_name)
+            .limit(limit)
+            .send()
+            .await
+            .map_err(|e| AppError::new("failed to scan items", e))?;
+
+        let mut items: Vec<Item> = output
+            .items
+            .unwrap_or_default()
+            .into_iter()
+            .map(to_item)
+            .collect();
+        sort_items(&mut items, schema);
+        Ok(items)
+    }
+
+    pub async fn query_items(
+        &self,
+        table_name: &str,
+        request: &QueryRequest,
+        schema: &KeySchemaType,
+    ) -> AppResult<Vec<Item>> {
+        let (key_condition, names, values) = build_key_condition(request);
+
         let mut last_evaluated_key = None;
         let mut items = Vec::new();
         loop {
-            let mut req = self.client.scan().table_name(table_name);
+            let mut req = self
+                .client
+                .query()
+                .table_name(table_name)
+                .key_condition_expression(&key_condition)
+                .set_expression_attribute_names(Some(names.clone()))
+                .set_expression_attribute_values(Some(values.clone()));
+            if let Some(index) = &request.index_name {
+                req = req.index_name(index);
+            }
             if last_evaluated_key.is_some() {
                 req = req.set_exclusive_start_key(last_evaluated_key);
             }
 
             let result = req.send().await;
-            let output = result.map_err(|e| AppError::new("failed to scan items", e))?;
+            let output = result.map_err(|e| AppError::new("failed to query items", e))?;
 
             items.extend(output.items.unwrap_or_default().into_iter().map(to_item));
 
@@ -126,6 +179,136 @@ impl Client {
         }
         sort_items(&mut items, schema);
         Ok(items)
+    }
+
+    pub async fn put_item(&self, table_name: &str, item: &Item) -> AppResult<()> {
+        let aws_item = to_aws_item(item);
+        self.client
+            .put_item()
+            .table_name(table_name)
+            .set_item(Some(aws_item))
+            .send()
+            .await
+            .map_err(|e| AppError::new("failed to put item", e))?;
+        Ok(())
+    }
+
+    pub async fn delete_item(
+        &self,
+        table_name: &str,
+        item: &Item,
+        schema: &KeySchemaType,
+    ) -> AppResult<()> {
+        let key = key_of(item, schema);
+        self.client
+            .delete_item()
+            .table_name(table_name)
+            .set_key(Some(key))
+            .send()
+            .await
+            .map_err(|e| AppError::new("failed to delete item", e))?;
+        Ok(())
+    }
+}
+
+/// Build a `KeyConditionExpression` plus its expression attribute name/value maps
+/// from a [`QueryRequest`]. Uses `#p`/`#s` name placeholders and `:p`/`:s`/`:s2`
+/// value placeholders so arbitrary attribute names are safe.
+fn build_key_condition(
+    request: &QueryRequest,
+) -> (
+    String,
+    HashMap<String, String>,
+    HashMap<String, AwsAttributeValue>,
+) {
+    let mut names = HashMap::new();
+    let mut values = HashMap::new();
+
+    let (pk_name, pk_value) = &request.partition_key;
+    names.insert("#p".to_string(), pk_name.clone());
+    values.insert(":p".to_string(), to_aws_attribute_value(pk_value));
+    let mut expr = "#p = :p".to_string();
+
+    if let Some((sk_name, cond)) = &request.sort_key {
+        names.insert("#s".to_string(), sk_name.clone());
+        match cond {
+            SortKeyCondition::Eq(v) => {
+                values.insert(":s".to_string(), to_aws_attribute_value(v));
+                expr.push_str(" AND #s = :s");
+            }
+            SortKeyCondition::BeginsWith(s) => {
+                values.insert(":s".to_string(), AwsAttributeValue::S(s.clone()));
+                expr.push_str(" AND begins_with(#s, :s)");
+            }
+            SortKeyCondition::Lt(v) => {
+                values.insert(":s".to_string(), to_aws_attribute_value(v));
+                expr.push_str(" AND #s < :s");
+            }
+            SortKeyCondition::Le(v) => {
+                values.insert(":s".to_string(), to_aws_attribute_value(v));
+                expr.push_str(" AND #s <= :s");
+            }
+            SortKeyCondition::Gt(v) => {
+                values.insert(":s".to_string(), to_aws_attribute_value(v));
+                expr.push_str(" AND #s > :s");
+            }
+            SortKeyCondition::Ge(v) => {
+                values.insert(":s".to_string(), to_aws_attribute_value(v));
+                expr.push_str(" AND #s >= :s");
+            }
+            SortKeyCondition::Between(a, b) => {
+                values.insert(":s".to_string(), to_aws_attribute_value(a));
+                values.insert(":s2".to_string(), to_aws_attribute_value(b));
+                expr.push_str(" AND #s BETWEEN :s AND :s2");
+            }
+        }
+    }
+
+    (expr, names, values)
+}
+
+fn key_of(item: &Item, schema: &KeySchemaType) -> HashMap<String, AwsAttributeValue> {
+    let mut key = HashMap::new();
+    let mut add = |name: &str| {
+        if let Some(attr) = item.attributes.get(name) {
+            key.insert(name.to_string(), to_aws_attribute_value(attr));
+        }
+    };
+    match schema {
+        KeySchemaType::Hash(pk) => add(pk),
+        KeySchemaType::HashRange(pk, sk) => {
+            add(pk);
+            add(sk);
+        }
+    }
+    key
+}
+
+pub fn to_aws_item(item: &Item) -> HashMap<String, AwsAttributeValue> {
+    item.attributes
+        .iter()
+        .map(|(k, v)| (k.clone(), to_aws_attribute_value(v)))
+        .collect()
+}
+
+fn to_aws_attribute_value(attr: &Attribute) -> AwsAttributeValue {
+    match attr {
+        Attribute::S(s) => AwsAttributeValue::S(s.clone()),
+        Attribute::N(n) => AwsAttributeValue::N(n.to_string()),
+        Attribute::B(b) => AwsAttributeValue::B(Blob::new(b.clone())),
+        Attribute::BOOL(b) => AwsAttributeValue::Bool(*b),
+        Attribute::NULL => AwsAttributeValue::Null(true),
+        Attribute::L(vs) => AwsAttributeValue::L(vs.iter().map(to_aws_attribute_value).collect()),
+        Attribute::M(m) => AwsAttributeValue::M(
+            m.iter()
+                .map(|(k, v)| (k.clone(), to_aws_attribute_value(v)))
+                .collect(),
+        ),
+        Attribute::SS(ss) => AwsAttributeValue::Ss(ss.iter().cloned().collect()),
+        Attribute::NS(ns) => AwsAttributeValue::Ns(ns.iter().map(|n| n.to_string()).collect()),
+        Attribute::BS(bs) => {
+            AwsAttributeValue::Bs(bs.iter().map(|b| Blob::new(b.clone())).collect())
+        }
     }
 }
 
@@ -392,6 +575,109 @@ fn sort_items(items: &mut [Item], schema: &KeySchemaType) {
 fn convert_datetime(dt: AwsDateTime) -> DateTime<Local> {
     let nanos = dt.as_nanos();
     Local.timestamp_nanos(nanos as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &AwsAttributeValue) -> &str {
+        match v {
+            AwsAttributeValue::S(s) => s,
+            other => panic!("expected S, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_condition_pk_only() {
+        let req = QueryRequest {
+            index_name: None,
+            partition_key: ("PK".into(), Attribute::S("u#1".into())),
+            sort_key: None,
+        };
+        let (expr, names, values) = build_key_condition(&req);
+        assert_eq!(expr, "#p = :p");
+        assert_eq!(names.get("#p").map(String::as_str), Some("PK"));
+        assert_eq!(s(values.get(":p").unwrap()), "u#1");
+    }
+
+    #[test]
+    fn key_condition_pk_and_begins_with() {
+        let req = QueryRequest {
+            index_name: Some("orgIndex".into()),
+            partition_key: ("orgId".into(), Attribute::S("o#7".into())),
+            sort_key: Some(("SK".into(), SortKeyCondition::BeginsWith("PAY#".into()))),
+        };
+        let (expr, names, values) = build_key_condition(&req);
+        assert_eq!(expr, "#p = :p AND begins_with(#s, :s)");
+        assert_eq!(names.get("#s").map(String::as_str), Some("SK"));
+        assert_eq!(s(values.get(":s").unwrap()), "PAY#");
+    }
+
+    // End-to-end against a local DynamoDB throwaway table `ddv_e2e_test`.
+    // Run with: cargo test -- --ignored e2e_local_crud
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_local_crud() {
+        std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+        std::env::set_var("AWS_REGION", "eu-west-1");
+        let client = Client::new(
+            None,
+            Some("http://127.0.0.1:8000".to_string()),
+            None,
+            "eu-west-1".to_string(),
+        )
+        .await;
+        let table = "ddv_e2e_test";
+        let schema = KeySchemaType::HashRange("pk".into(), "sk".into());
+
+        let mut attrs = HashMap::new();
+        attrs.insert("pk".to_string(), Attribute::S("U#1".into()));
+        attrs.insert("sk".to_string(), Attribute::S("PROFILE".into()));
+        attrs.insert("name".to_string(), Attribute::S("neo".into()));
+        let item = Item { attributes: attrs };
+
+        // put
+        client.put_item(table, &item).await.map_err(|e| e.msg).unwrap();
+
+        // query it back
+        let req = QueryRequest {
+            index_name: None,
+            partition_key: ("pk".into(), Attribute::S("U#1".into())),
+            sort_key: Some(("sk".into(), SortKeyCondition::BeginsWith("PRO".into()))),
+        };
+        let found = client.query_items(table, &req, &schema).await.map_err(|e| e.msg).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].attributes.get("name"),
+            Some(&Attribute::S("neo".into()))
+        );
+
+        // delete it
+        client.delete_item(table, &item, &schema).await.map_err(|e| e.msg).unwrap();
+        let after = client.query_items(table, &req, &schema).await.map_err(|e| e.msg).unwrap();
+        assert!(after.is_empty(), "item should be gone after delete");
+    }
+
+    #[test]
+    fn key_condition_between() {
+        let req = QueryRequest {
+            index_name: None,
+            partition_key: ("PK".into(), Attribute::S("x".into())),
+            sort_key: Some((
+                "SK".into(),
+                SortKeyCondition::Between(
+                    Attribute::S("2024-01".into()),
+                    Attribute::S("2024-12".into()),
+                ),
+            )),
+        };
+        let (expr, _names, values) = build_key_condition(&req);
+        assert_eq!(expr, "#p = :p AND #s BETWEEN :s AND :s2");
+        assert_eq!(s(values.get(":s").unwrap()), "2024-01");
+        assert_eq!(s(values.get(":s2").unwrap()), "2024-12");
+    }
 }
 
 fn vec_into<T, U>(ts: Vec<T>) -> Vec<U>

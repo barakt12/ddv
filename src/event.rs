@@ -1,9 +1,13 @@
-use std::{sync::mpsc, thread};
+use std::{
+    sync::{mpsc, Arc},
+    thread,
+};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    data::{Item, Table, TableDescription, TableInsight},
+    client::Client,
+    data::{Item, QueryRequest, Table, TableDescription, TableInsight},
     error::{AppError, AppResult},
     help::Spans,
 };
@@ -11,6 +15,8 @@ use crate::{
 pub enum AppEvent {
     Key(KeyEvent),
     Resize(usize, usize),
+    SelectProfile(String),
+    ClientReady(Arc<Client>),
     Initialize,
     CompleteInitialize(AppResult<Vec<Table>>),
     LoadTableDescription(String),
@@ -18,6 +24,13 @@ pub enum AppEvent {
     LoadTableItems(TableDescription),
     CompleteLoadTableItems(TableDescription, AppResult<Vec<Item>>),
     OpenItem(TableDescription, Item),
+    OpenQueryForm(TableDescription),
+    RunQuery(TableDescription, QueryRequest),
+    OpenEditor(TableDescription, Option<Item>),
+    SaveItem(TableDescription, Item),
+    CompleteSaveItem(TableDescription, AppResult<()>),
+    DeleteItem(TableDescription, Item),
+    CompleteDeleteItem(TableDescription, AppResult<()>),
     OpenTableInsight(TableInsight),
     OpenHelp(Vec<Spans>),
     BackToBeforeView,
@@ -106,6 +119,12 @@ pub enum UserEvent {
     Narrow,
     Reload,
     CopyToClipboard,
+    Query,
+    Edit,
+    New,
+    Save,
+    ToggleJsonMode,
+    Delete,
     Help,
 }
 
@@ -150,6 +169,12 @@ impl UserEventMapper {
             (KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE), UserEvent::Narrow),
             (KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE), UserEvent::Reload),
             (KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), UserEvent::CopyToClipboard),
+            (KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), UserEvent::Query),
+            (KeyEvent::new(KeyCode::Char('E'), KeyModifiers::NONE), UserEvent::Edit),
+            (KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE), UserEvent::New),
+            (KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL), UserEvent::Save),
+            (KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL), UserEvent::ToggleJsonMode),
+            (KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE), UserEvent::Delete),
             (KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE), UserEvent::Help),
         ];
         UserEventMapper { map }

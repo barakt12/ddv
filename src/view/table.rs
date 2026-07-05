@@ -1,10 +1,10 @@
 use ratatui::{
-    crossterm::event::KeyEvent,
-    layout::{Margin, Rect},
+    crossterm::event::{KeyCode, KeyEvent},
+    layout::{Constraint, Flex, Layout, Margin, Rect},
     style::Stylize,
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, Cell, Clear},
+    widgets::{Block, Cell, Clear, Paragraph},
     Frame,
 };
 use tui_input::{backend::crossterm::EventHandler, Input};
@@ -13,8 +13,8 @@ use crate::{
     color::ColorTheme,
     config::UiTableConfig,
     data::{
-        list_attribute_keys, Attribute, Item, KeySchemaType, RawAttributeJsonWrapper, RawJsonItem,
-        TableDescription, TableInsight,
+        list_attribute_keys, to_key_string, Attribute, Item, KeySchemaType, RawAttributeJsonWrapper,
+        RawJsonItem, TableDescription, TableInsight,
     },
     event::{AppEvent, Sender, UserEvent, UserEventMapper},
     handle_user_events, handle_user_events_with_default,
@@ -27,6 +27,16 @@ use crate::{
 };
 
 const ELLIPSIS: &str = "...";
+
+fn center(area: Rect, width: u16, height: u16) -> Rect {
+    let [h] = Layout::horizontal([Constraint::Length(width)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [v] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(h);
+    v
+}
 
 pub struct TableView {
     table_description: TableDescription,
@@ -46,6 +56,7 @@ pub struct TableView {
     filter_state: FilterState,
     filter_input: Input,
     view_indices: Vec<usize>,
+    pending_delete: Option<Item>,
 }
 
 enum FilterState {
@@ -96,12 +107,30 @@ impl TableView {
             filter_state: FilterState::None,
             filter_input: Input::default(),
             view_indices,
+            pending_delete: None,
         }
     }
 }
 
 impl TableView {
     pub fn handle_user_key_event(&mut self, user_events: Vec<UserEvent>, key_event: KeyEvent) {
+        if self.pending_delete.is_some() {
+            match key_event.code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    if let Some(item) = self.pending_delete.take() {
+                        self.tx.send(AppEvent::DeleteItem(
+                            self.table_description.clone(),
+                            item,
+                        ));
+                    }
+                }
+                _ => {
+                    self.pending_delete = None; // any other key cancels
+                }
+            }
+            return;
+        }
+
         if let FilterState::Filtering = self.filter_state {
             handle_user_events_with_default! { user_events =>
                 UserEvent::Confirm => {
@@ -227,6 +256,18 @@ impl TableView {
                 UserEvent::Insight => {
                     self.open_table_insight();
                 }
+                UserEvent::Query => {
+                    self.open_query_form();
+                }
+                UserEvent::Edit => {
+                    self.open_editor_for_selected();
+                }
+                UserEvent::New => {
+                    self.open_editor_for_new();
+                }
+                UserEvent::Delete => {
+                    self.request_delete_selected();
+                }
                 UserEvent::Expand => {
                     self.open_expand_selected_attr();
                 }
@@ -274,6 +315,26 @@ impl TableView {
 
         if self.attr_expanded {
             self.render_expanded_item(f, table_area);
+        }
+
+        if let Some(item) = &self.pending_delete {
+            let key = to_key_string(item, &self.table_description.key_schema_type);
+            let width = (key.len() as u16 + 6).clamp(32, area.width.saturating_sub(4));
+            let dialog_area = center(area, width, 7);
+            f.render_widget(Clear, dialog_area);
+            let lines = vec![
+                Line::from("Delete this item?".bold()),
+                Line::from(""),
+                Line::from(key.fg(self.theme.fg)),
+                Line::from(""),
+                Line::from("[Enter/y] delete   [Esc] cancel".fg(self.theme.short_help)),
+            ];
+            let dialog = Paragraph::new(lines).centered().block(
+                Block::bordered()
+                    .fg(self.theme.notification_error)
+                    .bg(self.theme.bg),
+            );
+            f.render_widget(dialog, dialog_area);
         }
     }
 
@@ -490,6 +551,31 @@ impl TableView {
             let desc = self.table_description.clone();
             let item = item.clone();
             self.tx.send(AppEvent::OpenItem(desc, item));
+        }
+    }
+
+    fn open_query_form(&self) {
+        self.tx
+            .send(AppEvent::OpenQueryForm(self.table_description.clone()));
+    }
+
+    fn open_editor_for_selected(&self) {
+        if let Some(item) = self.current_selected_item() {
+            self.tx.send(AppEvent::OpenEditor(
+                self.table_description.clone(),
+                Some(item.clone()),
+            ));
+        }
+    }
+
+    fn open_editor_for_new(&self) {
+        self.tx
+            .send(AppEvent::OpenEditor(self.table_description.clone(), None));
+    }
+
+    fn request_delete_selected(&mut self) {
+        if let Some(item) = self.current_selected_item().cloned() {
+            self.pending_delete = Some(item);
         }
     }
 

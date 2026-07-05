@@ -288,6 +288,27 @@ impl PartialOrd for Attribute {
     }
 }
 
+/// A condition on the sort key of a Query.
+#[derive(Debug, Clone)]
+pub enum SortKeyCondition {
+    Eq(Attribute),
+    BeginsWith(String),
+    Lt(Attribute),
+    Le(Attribute),
+    Gt(Attribute),
+    Ge(Attribute),
+    Between(Attribute, Attribute),
+}
+
+/// A fully-specified DynamoDB Query (never a Scan): a partition-key equality,
+/// an optional sort-key condition, and an optional index to run it against.
+#[derive(Debug, Clone)]
+pub struct QueryRequest {
+    pub index_name: Option<String>,
+    pub partition_key: (String, Attribute),
+    pub sort_key: Option<(String, SortKeyCondition)>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AttributeType {
     String,
