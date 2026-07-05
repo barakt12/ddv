@@ -3,7 +3,7 @@ use std::{sync::mpsc, thread};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    data::{Item, Table, TableDescription, TableInsight},
+    data::{Item, QueryRequest, Table, TableDescription, TableInsight},
     error::{AppError, AppResult},
     help::Spans,
 };
@@ -18,6 +18,8 @@ pub enum AppEvent {
     LoadTableItems(TableDescription),
     CompleteLoadTableItems(TableDescription, AppResult<Vec<Item>>),
     OpenItem(TableDescription, Item),
+    OpenQueryForm(TableDescription),
+    RunQuery(TableDescription, QueryRequest),
     OpenTableInsight(TableInsight),
     OpenHelp(Vec<Spans>),
     BackToBeforeView,
@@ -106,6 +108,7 @@ pub enum UserEvent {
     Narrow,
     Reload,
     CopyToClipboard,
+    Query,
     Help,
 }
 
@@ -150,6 +153,7 @@ impl UserEventMapper {
             (KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE), UserEvent::Narrow),
             (KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE), UserEvent::Reload),
             (KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), UserEvent::CopyToClipboard),
+            (KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), UserEvent::Query),
             (KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE), UserEvent::Help),
         ];
         UserEventMapper { map }

@@ -14,7 +14,7 @@ use crate::{
     client::Client,
     color::ColorTheme,
     config::Config,
-    data::{Item, Table, TableDescription, TableInsight},
+    data::{Item, QueryRequest, Table, TableDescription, TableInsight},
     error::{AppError, AppResult},
     event::{AppEvent, Receiver, Sender, UserEvent, UserEventMapper},
     handle_user_events,
@@ -134,6 +134,12 @@ impl App {
                 }
                 AppEvent::OpenItem(desc, item) => {
                     self.open_item(desc, item);
+                }
+                AppEvent::OpenQueryForm(desc) => {
+                    self.open_query_form(desc);
+                }
+                AppEvent::RunQuery(desc, request) => {
+                    self.run_query(desc, request);
                 }
                 AppEvent::OpenTableInsight(insight) => {
                     self.open_table_insight(insight);
@@ -327,6 +333,25 @@ impl App {
     fn open_item(&mut self, desc: TableDescription, item: Item) {
         let view = View::of_item(desc, item, &self.mapper, self.theme, self.tx.clone());
         self.view_stack.push(view);
+    }
+
+    fn open_query_form(&mut self, desc: TableDescription) {
+        let view = View::of_query(desc, &self.mapper, self.theme, self.tx.clone());
+        self.view_stack.push(view);
+    }
+
+    fn run_query(&mut self, desc: TableDescription, request: QueryRequest) {
+        // leave the query form; results replace the underlying table view
+        self.view_stack.pop();
+        self.loading = true;
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        spawn(async move {
+            let result = client
+                .query_items(&desc.table_name, &request, &desc.key_schema_type)
+                .await;
+            tx.send(AppEvent::CompleteLoadTableItems(desc, result));
+        });
     }
 
     fn open_table_insight(&mut self, insight: TableInsight) {

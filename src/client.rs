@@ -565,6 +565,63 @@ fn convert_datetime(dt: AwsDateTime) -> DateTime<Local> {
     Local.timestamp_nanos(nanos as i64)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &AwsAttributeValue) -> &str {
+        match v {
+            AwsAttributeValue::S(s) => s,
+            other => panic!("expected S, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_condition_pk_only() {
+        let req = QueryRequest {
+            index_name: None,
+            partition_key: ("PK".into(), Attribute::S("u#1".into())),
+            sort_key: None,
+        };
+        let (expr, names, values) = build_key_condition(&req);
+        assert_eq!(expr, "#p = :p");
+        assert_eq!(names.get("#p").map(String::as_str), Some("PK"));
+        assert_eq!(s(values.get(":p").unwrap()), "u#1");
+    }
+
+    #[test]
+    fn key_condition_pk_and_begins_with() {
+        let req = QueryRequest {
+            index_name: Some("orgIndex".into()),
+            partition_key: ("orgId".into(), Attribute::S("o#7".into())),
+            sort_key: Some(("SK".into(), SortKeyCondition::BeginsWith("PAY#".into()))),
+        };
+        let (expr, names, values) = build_key_condition(&req);
+        assert_eq!(expr, "#p = :p AND begins_with(#s, :s)");
+        assert_eq!(names.get("#s").map(String::as_str), Some("SK"));
+        assert_eq!(s(values.get(":s").unwrap()), "PAY#");
+    }
+
+    #[test]
+    fn key_condition_between() {
+        let req = QueryRequest {
+            index_name: None,
+            partition_key: ("PK".into(), Attribute::S("x".into())),
+            sort_key: Some((
+                "SK".into(),
+                SortKeyCondition::Between(
+                    Attribute::S("2024-01".into()),
+                    Attribute::S("2024-12".into()),
+                ),
+            )),
+        };
+        let (expr, _names, values) = build_key_condition(&req);
+        assert_eq!(expr, "#p = :p AND #s BETWEEN :s AND :s2");
+        assert_eq!(s(values.get(":s").unwrap()), "2024-01");
+        assert_eq!(s(values.get(":s2").unwrap()), "2024-12");
+    }
+}
+
 fn vec_into<T, U>(ts: Vec<T>) -> Vec<U>
 where
     U: From<T>,

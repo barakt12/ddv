@@ -227,6 +227,9 @@ impl TableView {
                 UserEvent::Insight => {
                     self.open_table_insight();
                 }
+                UserEvent::Query => {
+                    self.open_query_form();
+                }
                 UserEvent::Expand => {
                     self.open_expand_selected_attr();
                 }
@@ -491,6 +494,11 @@ impl TableView {
             let item = item.clone();
             self.tx.send(AppEvent::OpenItem(desc, item));
         }
+    }
+
+    fn open_query_form(&self) {
+        self.tx
+            .send(AppEvent::OpenQueryForm(self.table_description.clone()));
     }
 
     fn open_table_insight(&self) {
