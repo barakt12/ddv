@@ -1,4 +1,5 @@
 mod app;
+mod aws_profiles;
 mod client;
 mod color;
 mod config;
@@ -15,7 +16,12 @@ mod widget;
 
 use clap::Parser;
 
-use crate::{app::App, client::Client, color::ColorTheme, config::Config, event::UserEventMapper};
+use crate::{
+    app::{App, ConnParams},
+    color::ColorTheme,
+    config::Config,
+    event::UserEventMapper,
+};
 
 /// DDV - Terminal DynamoDB Viewer ⚡️
 #[derive(Parser)]
@@ -41,20 +47,30 @@ async fn main() -> std::io::Result<()> {
     let theme = ColorTheme::default();
     let mapper = UserEventMapper::new();
 
-    let client = Client::new(
-        args.region,
-        args.endpoint_url,
-        args.profile,
-        config.default_region.clone(),
-    )
-    .await;
     let (tx, rx) = event::init();
 
-    tx.send(event::AppEvent::Initialize);
+    let conn = ConnParams {
+        region: args.region,
+        endpoint_url: args.endpoint_url,
+        default_region: config.default_region.clone(),
+    };
+    let profile = args.profile;
+    // Curated list from config if provided, else every profile in the AWS files.
+    let profiles = if config.profiles.is_empty() {
+        aws_profiles::list_profiles()
+    } else {
+        config.profiles.clone()
+    };
+
+    // If a profile was passed on the CLI, use it directly; otherwise the app
+    // opens on a profile picker.
+    if let Some(p) = &profile {
+        tx.send(event::AppEvent::SelectProfile(p.clone()));
+    }
 
     let mut terminal = ratatui::init();
 
-    let mut app = App::new(config, theme, mapper, client, tx);
+    let mut app = App::new(config, theme, mapper, conn, profile, profiles, tx);
     let ret = app.run(&mut terminal, rx);
 
     ratatui::restore();

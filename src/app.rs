@@ -31,6 +31,14 @@ enum Status {
     Input(String, Option<u16>),
 }
 
+/// Connection parameters needed to build a client once a profile is chosen.
+#[derive(Clone)]
+pub struct ConnParams {
+    pub region: Option<String>,
+    pub endpoint_url: Option<String>,
+    pub default_region: String,
+}
+
 pub struct App {
     view_stack: ViewStack,
 
@@ -41,7 +49,8 @@ pub struct App {
     status: Status,
     loading: bool,
 
-    client: Arc<Client>,
+    client: Option<Arc<Client>>,
+    conn: ConnParams,
     tx: Sender,
 }
 
@@ -50,19 +59,35 @@ impl App {
         config: Config,
         theme: ColorTheme,
         mapper: UserEventMapper,
-        client: Client,
+        conn: ConnParams,
+        profile: Option<String>,
+        profiles: Vec<String>,
         tx: Sender,
     ) -> Self {
+        // With a profile already chosen (via --profile), go straight to loading;
+        // otherwise start on the profile picker.
+        let (initial_view, loading) = match &profile {
+            Some(_) => (View::of_init(theme, tx.clone()), true),
+            None => (
+                View::of_profile_list(profiles, &mapper, theme, tx.clone()),
+                false,
+            ),
+        };
         App {
-            view_stack: ViewStack::new(View::of_init(theme, tx.clone())),
+            view_stack: ViewStack::new(initial_view),
             config,
             theme,
             mapper,
             status: Status::None,
-            loading: true,
-            client: Arc::new(client),
+            loading,
+            client: None,
+            conn,
             tx,
         }
+    }
+
+    fn client(&self) -> Arc<Client> {
+        self.client.clone().expect("client used before a profile was selected")
     }
 }
 
@@ -113,6 +138,12 @@ impl App {
                 }
                 AppEvent::Resize(w, h) => {
                     let _ = (w, h);
+                }
+                AppEvent::SelectProfile(profile) => {
+                    self.select_profile(profile);
+                }
+                AppEvent::ClientReady(client) => {
+                    self.client_ready(client);
                 }
                 AppEvent::Initialize => {
                     self.initialize();
@@ -244,8 +275,29 @@ impl App {
 }
 
 impl App {
+    fn select_profile(&mut self, profile: String) {
+        self.loading = true;
+        let conn = self.conn.clone();
+        let tx = self.tx.clone();
+        spawn(async move {
+            let client = Client::new(
+                conn.region.clone(),
+                conn.endpoint_url.clone(),
+                Some(profile),
+                conn.default_region.clone(),
+            )
+            .await;
+            tx.send(AppEvent::ClientReady(Arc::new(client)));
+        });
+    }
+
+    fn client_ready(&mut self, client: Arc<Client>) {
+        self.client = Some(client);
+        self.tx.send(AppEvent::Initialize);
+    }
+
     fn initialize(&self) {
-        let client = self.client.clone();
+        let client = self.client();
         let tx = self.tx.clone();
         spawn(async move {
             let result = client.list_all_tables().await;
@@ -282,7 +334,7 @@ impl App {
 
     fn load_table_description(&mut self, name: String) {
         self.loading = true;
-        let client = self.client.clone();
+        let client = self.client();
         let tx = self.tx.clone();
         spawn(async move {
             let result = client.describe_table(&name).await;
@@ -306,7 +358,7 @@ impl App {
 
     fn load_table_items(&mut self, desc: TableDescription) {
         self.loading = true;
-        let client = self.client.clone();
+        let client = self.client();
         let tx = self.tx.clone();
         spawn(async move {
             let result = client
@@ -363,7 +415,7 @@ impl App {
         // leave the query form; results replace the underlying table view
         self.view_stack.pop();
         self.loading = true;
-        let client = self.client.clone();
+        let client = self.client();
         let tx = self.tx.clone();
         spawn(async move {
             let result = client
@@ -380,7 +432,7 @@ impl App {
 
     fn save_item(&mut self, desc: TableDescription, item: Item) {
         self.loading = true;
-        let client = self.client.clone();
+        let client = self.client();
         let tx = self.tx.clone();
         spawn(async move {
             let result = client.put_item(&desc.table_name, &item).await;
@@ -407,7 +459,7 @@ impl App {
 
     fn delete_item(&mut self, desc: TableDescription, item: Item) {
         self.loading = true;
-        let client = self.client.clone();
+        let client = self.client();
         let tx = self.tx.clone();
         spawn(async move {
             let result = client

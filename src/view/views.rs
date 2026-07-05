@@ -7,13 +7,15 @@ use crate::{
     event::{Sender, UserEvent, UserEventMapper},
     help::{Spans, SpansWithPriority},
     view::{
-        edit::EditView, help::HelpView, init::InitView, item::ItemView, query::QueryView,
-        table::TableView, table_insight::TableInsightView, table_list::TableListView,
+        edit::EditView, help::HelpView, init::InitView, item::ItemView,
+        profile_list::ProfileListView, query::QueryView, table::TableView,
+        table_insight::TableInsightView, table_list::TableListView,
     },
 };
 
 pub enum View {
     Init(Box<InitView>),
+    ProfileList(Box<ProfileListView>),
     TableList(Box<TableListView>),
     Table(Box<TableView>),
     Item(Box<ItemView>),
@@ -27,6 +29,7 @@ impl View {
     pub fn handle_user_key_event(&mut self, user_events: Vec<UserEvent>, key_event: KeyEvent) {
         match self {
             View::Init(view) => view.handle_user_key_event(user_events, key_event),
+            View::ProfileList(view) => view.handle_user_key_event(user_events, key_event),
             View::TableList(view) => view.handle_user_key_event(user_events, key_event),
             View::Table(view) => view.handle_user_key_event(user_events, key_event),
             View::Item(view) => view.handle_user_key_event(user_events, key_event),
@@ -40,6 +43,7 @@ impl View {
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
         match self {
             View::Init(view) => view.render(f, area),
+            View::ProfileList(view) => view.render(f, area),
             View::TableList(view) => view.render(f, area),
             View::Table(view) => view.render(f, area),
             View::Item(view) => view.render(f, area),
@@ -53,6 +57,7 @@ impl View {
     pub fn short_helps(&self) -> &[SpansWithPriority] {
         match self {
             View::Init(view) => view.short_helps(),
+            View::ProfileList(view) => view.short_helps(),
             View::TableList(view) => view.short_helps(),
             View::Table(view) => view.short_helps(),
             View::Item(view) => view.short_helps(),
@@ -67,6 +72,15 @@ impl View {
 impl View {
     pub fn of_init(theme: ColorTheme, tx: Sender) -> Self {
         View::Init(Box::new(InitView::new(theme, tx)))
+    }
+
+    pub fn of_profile_list(
+        profiles: Vec<String>,
+        mapper: &UserEventMapper,
+        theme: ColorTheme,
+        tx: Sender,
+    ) -> Self {
+        View::ProfileList(Box::new(ProfileListView::new(profiles, mapper, theme, tx)))
     }
 
     pub fn of_table_list(

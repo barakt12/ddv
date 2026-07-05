@@ -1,8 +1,12 @@
-use std::{sync::mpsc, thread};
+use std::{
+    sync::{mpsc, Arc},
+    thread,
+};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
+    client::Client,
     data::{Item, QueryRequest, Table, TableDescription, TableInsight},
     error::{AppError, AppResult},
     help::Spans,
@@ -11,6 +15,8 @@ use crate::{
 pub enum AppEvent {
     Key(KeyEvent),
     Resize(usize, usize),
+    SelectProfile(String),
+    ClientReady(Arc<Client>),
     Initialize,
     CompleteInitialize(AppResult<Vec<Table>>),
     LoadTableDescription(String),
