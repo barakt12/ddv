@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     str::FromStr,
+    time::Duration,
 };
 
 use aws_config::{default_provider, meta::region::RegionProviderChain, BehaviorVersion, Region};
@@ -15,7 +16,7 @@ use aws_sdk_dynamodb::types::{
     TableStatus as AwsTableStatus,
 };
 use aws_sdk_dynamodb::primitives::Blob;
-use aws_smithy_types::DateTime as AwsDateTime;
+use aws_smithy_types::{timeout::TimeoutConfig, DateTime as AwsDateTime};
 use chrono::{DateTime, Local, TimeZone as _};
 use rust_decimal::Decimal;
 
@@ -48,8 +49,15 @@ impl Client {
             .or_else(region_builder.build())
             .or_else(Region::new(default_region_fallback));
 
-        let mut config_loader =
-            aws_config::defaults(BehaviorVersion::latest()).region(region_provider);
+        // Fail fast on an unreachable endpoint (e.g. a stopped local DynamoDB)
+        // instead of hanging on the loading screen forever.
+        let timeout_config = TimeoutConfig::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .operation_timeout(Duration::from_secs(20))
+            .build();
+        let mut config_loader = aws_config::defaults(BehaviorVersion::latest())
+            .region(region_provider)
+            .timeout_config(timeout_config);
         if let Some(endpoint_url) = &endpoint_url {
             config_loader = config_loader.endpoint_url(endpoint_url);
         }
